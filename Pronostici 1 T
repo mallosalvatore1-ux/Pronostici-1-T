@@ -1,0 +1,142 @@
+import streamlit as st
+import requests
+from datetime import datetime
+
+# Configurazione della pagina Streamlit
+st.set_page_config(
+    page_title="Goal 1H Favorita",
+    page_icon="⚽",
+    layout="centered"
+)
+
+# --- CHIAVE API INTEGRATA ---
+DEFAULT_API_KEY = "8c3e4acb429800f2555957670c3931d1"
+
+st.title("⚽ Pronostico Goal 1° Tempo")
+st.caption("Analisi automatica basata sui dati in tempo reale di API-Football")
+
+# Sidebar per la gestione della data e delle impostazioni
+st.sidebar.header("⚙️ Impostazioni")
+
+# Selezione Data (Default: Oggi)
+data_scelta = st.sidebar.date_input("Seleziona Data", datetime.today())
+data_str = data_scelta.strftime("%Y-%m-%d")
+
+# Selezione Tipo di Provider API (API-Sports diretto o RapidAPI)
+provider = st.sidebar.radio("Tipo API Key:", ("API-Sports (Diretto)", "RapidAPI"), index=0)
+
+# Possibilità facoltativa di sovrascrivere la chiave dalla sidebar
+api_key_input = st.sidebar.text_input("API Key (Predefinita attiva)", value=DEFAULT_API_KEY, type="password")
+api_key = api_key_input if api_key_input else DEFAULT_API_KEY
+
+
+# --- FUNZIONI API FOOTBALL ---
+
+def get_headers(key, is_rapidapi):
+    """Restituisce gli header corretti per le chiamate HTTP."""
+    if is_rapidapi:
+        return {
+            "x-rapidapi-host": "v3.football.api-sports.io",
+            "x-rapidapi-key": key
+        }
+    else:
+        return {
+            "x-apisports-key": key
+        }
+
+@st.cache_data(ttl=300) # Caching di 5 minuti per evitare chiamate duplicate
+def get_fixtures_by_date(date_str, _headers):
+    """Recupera l'elenco delle partite programmate per la data selezionata."""
+    url = f"https://v3.football.api-sports.io/fixtures?date={date_str}"
+    try:
+        response = requests.get(url, headers=_headers, timeout=10).json()
+        return response.get("response", [])
+    except Exception as e:
+        st.error(f"Errore di connessione all'API: {e}")
+        return []
+
+def get_ht_stats(team_id, role, headers):
+    """
+    Calcola la % di partite con gol nel 1° tempo nelle ultime 10 gare della squadra.
+    """
+    url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&last=10&status=FT"
+    try:
+        res = requests.get(url, headers=headers, timeout=10).json()
+        matches = res.get("response", [])
+        if not matches:
+            return 0.0
+        
+        count_valid = 0
+        total_matches = 0
+
+        for m in matches:
+            is_home_match = (m["teams"]["home"]["id"] == team_id)
+            ht_home_goals = m["score"]["halftime"]["home"] or 0
+            
+            if role == "home" and is_home_match:
+                total_matches += 1
+                if ht_home_goals > 0:  # Ha segnato in casa nel 1H
+                    count_valid += 1
+            elif role == "away" and not is_home_match:
+                total_matches += 1
+                if ht_home_goals > 0:  # La squadra ospitante ha segnato (trasferta ha subito gol nel 1H)
+                    count_valid += 1
+                    
+        return (count_valid / total_matches * 100.0) if total_matches > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+# --- INTERFACCIA APPLICATIVA ---
+
+headers = get_headers(api_key, provider == "RapidAPI")
+
+with st.spinner(f"Caricamento palinsesto per il {data_str}..."):
+    fixtures = get_fixtures_by_date(data_str, headers)
+
+if not fixtures:
+    st.warning(f"⚠️ Nessuna partita trovata per il {data_str} o verifica la validità della tua API Key.")
+else:
+    # Mappatura delle partite per il menu a tendina
+    options = {}
+    for f in fixtures:
+        nazione = f["league"]["country"]
+        campionato = f["league"]["name"]
+        casa = f["teams"]["home"]["name"]
+        trasferta = f["teams"]["away"]["name"]
+        ora = f["fixture"]["date"][11:16]
+        
+        label = f"[{nazione} - {campionato}] {casa} vs {trasferta} ({ora})"
+        options[label] = f
+
+    st.subheader("📋 Palinsesto Partite")
+    scelta_label = st.selectbox("Seleziona la partita da analizzare:", list(options.keys()))
+    
+    if st.button("🔍 ANALIZZA MATCH SELEZIONATO", use_container_width=True):
+        match_selezionato = options[scelta_label]
+        
+        id_casa = match_selezionato["teams"]["home"]["id"]
+        nome_casa = match_selezionato["teams"]["home"]["name"]
+        
+        id_trasferta = match_selezionato["teams"]["away"]["id"]
+        nome_trasferta = match_selezionato["teams"]["away"]["name"]
+        
+        with st.spinner(f"Calcolo statistiche per {nome_casa} vs {nome_trasferta}..."):
+            perc_attacco_casa = get_ht_stats(id_casa, "home", headers)
+            perc_difesa_trasferta = get_ht_stats(id_trasferta, "away", headers)
+            score_affidabilita = (perc_attacco_casa + perc_difesa_trasferta) / 2
+            
+            st.markdown("---")
+            st.subheader(f"🏟️ {nome_casa} vs {nome_trasferta}")
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric(f"Gol 1H {nome_casa}", f"{perc_attacco_casa:.0f}%")
+            col2.metric(f"Gol Subiti 1H {nome_trasferta}", f"{perc_difesa_trasferta:.0f}%")
+            col3.metric("Score Affidabilità", f"{score_affidabilita:.1f}%")
+            
+            if score_affidabilita >= 70:
+                st.success(f"🔥 **PRONOSTICO CONSIGLIATO: GOAL 1° TEMPO {nome_casa.upper()}** (Alta Affidabilità)")
+            elif score_affidabilita >= 55:
+                st.warning(f"⚠️ **PRONOSTICO MODERATO: GOAL 1° TEMPO {nome_casa.upper()}** (Media Affidabilità)")
+            else:
+                st.error("⛔ **NO BET: Statistiche non sufficienti per il Gol nel 1° Tempo**")
